@@ -35,9 +35,9 @@ export default function CaptionsClient({ job, jobId, initialConfigured }: Captio
 
     useEffect(() => {
         if (job) {
-            // Filter processed reels
+            // Include all approved reels (with or without processed_path)
             const validReels = (job.reels || []).filter((r: any) =>
-                r.status === 'approved' && r.processed_path
+                r.status === 'approved'
             )
             setReels(validReels)
 
@@ -59,6 +59,8 @@ export default function CaptionsClient({ job, jobId, initialConfigured }: Captio
     }, [job])
 
     const handleGenerateCaptions = async () => {
+        console.log("Generate clicked", { geminiApiKey: geminiApiKey ? "set" : "not set", isEnvConfigured, selectedReels: selectedReels.size, reels: reels.length })
+
         if (!geminiApiKey && !isEnvConfigured) {
             alert("Please enter a Gemini API Key first")
             return
@@ -67,39 +69,60 @@ export default function CaptionsClient({ job, jobId, initialConfigured }: Captio
             alert("Please select at least one video")
             return
         }
+        if (reels.length === 0) {
+            alert("No reels available. Make sure videos are downloaded.")
+            return
+        }
 
         setIsGenerating(true)
         const newCaptions = { ...captions }
         const newOptions = { ...captionOptions }
+        let successCount = 0
+        let errorCount = 0
 
         for (const reel of reels) {
             if (selectedReels.has(reel.id)) {
                 try {
-                    const context = reel.caption || reel.title || reel.processed_path || "Viral Video"
+                    const context = reel.caption || reel.title || reel.id || "Viral Video"
                     const username = job?.config?.designHandle || ""
 
+                    console.log(`Generating caption for ${reel.id} with context: ${context}`)
+
                     const result = await generateCaptionWithGemini(geminiApiKey, context, username, selectedStyle)
+                    console.log(`Result for ${reel.id}:`, result)
 
                     if (typeof result === 'object' && result !== null) {
                         newOptions[reel.id] = { ...newOptions[reel.id], ...result }
 
                         if (result[selectedStyle]) {
                             newCaptions[reel.id] = result[selectedStyle]
+                            successCount++
                         }
                     } else {
                         newCaptions[reel.id] = result as string
+                        successCount++
                     }
-                } catch (e) {
+                } catch (e: any) {
                     console.error(`Failed for ${reel.id}:`, e)
+                    errorCount++
+                    // Show error to user
+                    if (errorCount === 1) {
+                        alert(`Gemini API Error: ${e?.message || "Unknown error"}. Check console for details.`)
+                    }
                 }
 
-                await new Promise(r => setTimeout(r, 2000))
+                // Rate limit delay
+                await new Promise(r => setTimeout(r, 1500))
             }
         }
 
         setCaptions(newCaptions)
         setCaptionOptions(newOptions)
         setIsGenerating(false)
+
+        if (successCount > 0) {
+            console.log(`Generated ${successCount} captions successfully`)
+        }
     }
 
     const applyStyle = (style: string, optionsSource = captionOptions) => {
@@ -220,7 +243,7 @@ export default function CaptionsClient({ job, jobId, initialConfigured }: Captio
                             {/* Video Preview Header */}
                             <div className="h-48 bg-black relative">
                                 <video
-                                    src={`/downloads/${jobId}/${reel.processed_path}`}
+                                    src={reel.processed_path ? `/downloads/${jobId}/${reel.processed_path}` : reel.url}
                                     className="w-full h-full object-cover opacity-60 group-hover:opacity-80 transition-opacity"
                                     onMouseOver={e => e.currentTarget.play()}
                                     onMouseOut={e => {
@@ -242,7 +265,7 @@ export default function CaptionsClient({ job, jobId, initialConfigured }: Captio
                                     </div>
                                 </div>
                                 <div className="absolute bottom-0 left-0 w-full p-3 bg-gradient-to-t from-black/90 to-transparent">
-                                    <p className="text-xs text-zinc-300 truncate font-mono">{reel.processed_path}</p>
+                                    <p className="text-xs text-zinc-300 truncate font-mono">{reel.id}</p>
                                 </div>
                             </div>
 

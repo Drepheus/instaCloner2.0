@@ -38,16 +38,70 @@ def scrape_profile(username, output_dir, max_count=12):
         quiet=True
     )
 
-    # Try to load cookies.txt
-    import http.cookiejar
-    cookie_path = os.path.join(os.path.dirname(__file__), '..', 'cookies.txt')
-    if os.path.exists(cookie_path):
+    # Try multiple authentication methods
+    authenticated = False
+    
+    # Method 1: Try to load existing session file
+    session_dir = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Instaloader")
+    session_files = []
+    if os.path.exists(session_dir):
+        session_files = [f for f in os.listdir(session_dir) if f.startswith("session-")]
+    
+    if session_files:
         try:
-            L.context._session.cookies = http.cookiejar.MozillaCookieJar(cookie_path)
-            L.context._session.cookies.load(ignore_discard=True, ignore_expires=True)
-            sys.stderr.write(f"Loaded cookies from {cookie_path}\n")
+            # Extract username from session filename (session-username format)
+            session_username = session_files[0].replace("session-", "")
+            L.load_session_from_file(session_username)
+            sys.stderr.write(f"Loaded session for {session_username}\n")
+            authenticated = True
         except Exception as e:
-            sys.stderr.write(f"Failed to load cookies: {e}\n")
+            sys.stderr.write(f"Failed to load session: {e}\n")
+    
+    # Method 2: Try to import from Edge browser
+    if not authenticated:
+        try:
+            L.load_session_from_file(L.test_login())
+        except:
+            pass
+        try:
+            import browser_cookie3
+            edge_cookies = browser_cookie3.edge(domain_name=".instagram.com")
+            for cookie in edge_cookies:
+                L.context._session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+            sys.stderr.write("Loaded cookies from Edge browser\n")
+            authenticated = True
+        except Exception as e:
+            sys.stderr.write(f"Could not load Edge cookies: {e}\n")
+    
+    # Method 3: Try to import from Chrome browser  
+    if not authenticated:
+        try:
+            import browser_cookie3
+            chrome_cookies = browser_cookie3.chrome(domain_name=".instagram.com")
+            for cookie in chrome_cookies:
+                L.context._session.cookies.set(cookie.name, cookie.value, domain=cookie.domain, path=cookie.path)
+            sys.stderr.write("Loaded cookies from Chrome browser\n")
+            authenticated = True
+        except Exception as e:
+            sys.stderr.write(f"Could not load Chrome cookies: {e}\n")
+    
+    # Method 4: Fallback to cookies.txt file
+    if not authenticated:
+        import http.cookiejar
+        cookie_path = os.path.join(os.path.dirname(__file__), '..', 'cookies.txt')
+        if os.path.exists(cookie_path):
+            try:
+                L.context._session.cookies = http.cookiejar.MozillaCookieJar(cookie_path)
+                L.context._session.cookies.load(ignore_discard=True, ignore_expires=True)
+                sys.stderr.write(f"Loaded cookies from {cookie_path}\n")
+                authenticated = True
+            except Exception as e:
+                sys.stderr.write(f"Failed to load cookies.txt: {e}\n")
+    
+    if not authenticated:
+        sys.stderr.write("WARNING: No authentication found. Scraping may fail with 403 errors.\n")
+        sys.stderr.write("To fix: Login to Instagram in Edge/Chrome, or create a cookies.txt file.\n")
+
     
     try:
         profile = instaloader.Profile.from_username(L.context, username)

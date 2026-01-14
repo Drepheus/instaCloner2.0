@@ -2,3 +2,5 @@ instaloader
 Pillow
 opencv-python-headless
 numpy
+browser-cookie3
+yt-dlp

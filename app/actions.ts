@@ -14,6 +14,12 @@ const DB_PATH = path.join(process.cwd(), "data", "jobs.json")
 const PRESET_PATH = path.join(process.cwd(), "data", "presets.json")
 const PERSISTED_LOGO_PATH = path.join(process.cwd(), "public", "persistent", "logo.png")
 
+// Cross-platform Python venv path
+const isWindows = process.platform === "win32"
+const VENV_PYTHON = isWindows
+    ? path.join(process.cwd(), ".venv", "Scripts", "python.exe")
+    : path.join(process.cwd(), ".venv", "bin", "python3")
+
 // Track active child processes by jobId
 const activeJobs = new Map<string, any>()
 
@@ -66,6 +72,116 @@ function extractInt(val: FormDataEntryValue | null, def: number): number {
     return isNaN(parsed) ? def : parsed
 }
 
+// New function: Create job from direct reel URLs - ACTUALLY DOWNLOADS VIDEOS
+export async function createDirectUrlJob(formData: FormData) {
+    const urlsRaw = formData.get("urls") as string
+    if (!urlsRaw) throw new Error("URLs are required")
+
+    const jobId = randomUUID()
+
+    // Parse URLs from textarea
+    const urls = urlsRaw
+        .split(/[\n,\s]+/)
+        .filter(Boolean)
+        .filter(line =>
+            line.includes('instagram.com/reel/') ||
+            line.includes('instagram.com/p/') ||
+            line.includes('instagram.com/reels/')
+        )
+
+    if (urls.length === 0) {
+        throw new Error("No valid Instagram reel URLs found")
+    }
+
+    console.log(`Creating direct URL job with ${urls.length} reels...`)
+
+    // Ensure job directory exists
+    const jobDirName = jobId
+    const jobDirAbs = path.join(process.cwd(), "public", "downloads", jobDirName)
+    await fs.mkdir(jobDirAbs, { recursive: true })
+
+    // Actually download the videos using yt-dlp
+    const scriptPath = path.join(process.cwd(), "scripts", "download_reels.py")
+    const urlArgs = urls.map(u => `"${u}"`).join(" ")
+
+    console.log(`Downloading ${urls.length} reels to ${jobDirAbs}...`)
+
+    let reels: any[] = []
+
+    try {
+        const { stdout, stderr } = await execAsync(
+            `"${VENV_PYTHON}" "${scriptPath}" "${jobDirAbs}" ${urlArgs}`,
+            { timeout: 300000 } // 5 minute timeout for downloads
+        )
+
+        if (stderr) {
+            console.log("Download progress:", stderr)
+        }
+
+        // Parse the JSON output
+        const jsonStart = stdout.indexOf('[')
+        if (jsonStart === -1) {
+            throw new Error("No JSON output from download script")
+        }
+
+        const downloadResults = JSON.parse(stdout.slice(jsonStart))
+
+        // Map results to reel format with correct paths
+        reels = downloadResults.map((r: any) => ({
+            id: r.id,
+            url: r.local_video_path ? `/downloads/${jobDirName}/${r.local_video_path}` : r.url,
+            thumbnail: r.local_thumb_path ? `/downloads/${jobDirName}/${r.local_thumb_path}` : null,
+            username: r.username || "instagram_user",
+            views: r.views || 0,
+            likes: r.likes || 0,
+            comments: r.comments || 0,
+            score: r.score || 0,
+            status: r.error ? "error" : "approved" as const,
+            playable_url: r.local_video_path ? `/downloads/${jobDirName}/${r.local_video_path}` : r.url,
+            original_url: r.original_url || r.url,
+            local_video_path: r.local_video_path,
+            local_thumb_path: r.local_thumb_path,
+            error: r.error
+        }))
+
+        // Filter out failed downloads
+        const successfulReels = reels.filter(r => !r.error)
+        const failedReels = reels.filter(r => r.error)
+
+        if (failedReels.length > 0) {
+            console.error(`${failedReels.length} reels failed to download:`, failedReels.map(r => r.error))
+        }
+
+        if (successfulReels.length === 0) {
+            throw new Error("All downloads failed. Check if the URLs are valid and accessible.")
+        }
+
+        reels = successfulReels
+        console.log(`Successfully downloaded ${reels.length} reels`)
+
+    } catch (error: any) {
+        console.error("Download failed:", error?.message)
+        console.error("Error details:", error?.stderr || error?.stdout)
+        throw new Error(`Download failed: ${error?.message}. Make sure yt-dlp is installed and URLs are valid.`)
+    }
+
+    await ensureDb()
+    const db = JSON.parse(await fs.readFile(DB_PATH, "utf-8"))
+
+    db[jobId] = {
+        id: jobId,
+        url: `Direct URLs (${reels.length} reels downloaded)`,
+        createdAt: new Date().toISOString(),
+        reels: reels,
+        isDirectUrl: true
+    }
+
+    await atomicWriteJson(DB_PATH, db)
+
+    redirect(`/jobs/${jobId}`)
+}
+
+
 export async function createScrapeJob(formData: FormData) {
     const url = formData.get("url") as string
     if (!url) throw new Error("URL is required")
@@ -76,17 +192,16 @@ export async function createScrapeJob(formData: FormData) {
 
     try {
         console.log(`Starting scrape for ${url} (Limit: ${reelsCount})...`)
-        const scriptPath = path.join(process.cwd(), "scripts", "scrape_profile.py")
+        const scriptPath = path.join(process.cwd(), "scripts", "scrape.js")
 
         // Ensure job directory exists
         const jobDirName = jobId
         const jobDirAbs = path.join(process.cwd(), "public", "downloads", jobDirName)
         await fs.mkdir(jobDirAbs, { recursive: true })
 
-        // Execute python script with output dir AND max_count
-        console.log(`Running python script: ${scriptPath} for ${url} -> ${jobDirAbs} (Max: ${reelsCount})`)
-        const venvPython = path.join(process.cwd(), ".venv", "bin", "python3")
-        const { stdout } = await execAsync(`"${venvPython}" "${scriptPath}" "${url}" "${jobDirAbs}" "${reelsCount}"`)
+        // Execute Node.js script with Playwright (no auth required)
+        console.log(`Running scrape script: ${scriptPath} for ${url} -> ${jobDirAbs}`)
+        const { stdout } = await execAsync(`node "${scriptPath}" "${url}" "${jobDirAbs}"`, { timeout: 120000 })
 
         // Parse result
         let mappedReels = []
@@ -140,34 +255,16 @@ export async function createScrapeJob(formData: FormData) {
         await atomicWriteJson(DB_PATH, db)
 
     } catch (error: any) {
-        console.error("Scraping failed:", error)
+        console.error("==========================================")
+        console.error("SCRAPING FAILED - DETAILED ERROR INFO:")
+        console.error("Error message:", error?.message)
+        console.error("Error code:", error?.code)
+        console.error("Error stderr:", error?.stderr)
+        console.error("Error stdout:", error?.stdout)
+        console.error("==========================================")
 
-        // FALLBACK TO MOCK DATA (Make it work strategy)
-        console.log("⚠️ Fallback to Mock Data due to scraping failure")
-
-        const mockReels = Array.from({ length: 12 }).map((_, i) => ({
-            id: `mock-${jobId}-${i}`,
-            url: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
-            thumbnail: `https://picsum.photos/seed/${jobId}-${i}/400/700`,
-            username: "instagram_demo_user",
-            views: Math.floor(Math.random() * 500000) + 10000,
-            likes: Math.floor(Math.random() * 50000) + 1000,
-            comments: Math.floor(Math.random() * 2000),
-            score: Math.floor(Math.random() * 100),
-            status: "approved" as const,
-            playable_url: "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"
-        }))
-
-        await ensureDb()
-        const db = JSON.parse(await fs.readFile(DB_PATH, "utf-8"))
-        db[jobId] = {
-            id: jobId,
-            url,
-            createdAt: new Date().toISOString(),
-            reels: mockReels,
-            isMock: true
-        }
-        await atomicWriteJson(DB_PATH, db)
+        // NO MOCK DATA - Throw the actual error
+        throw new Error(`Scraping failed: ${error?.message}. Try using direct reel URLs instead.`)
     }
 
     redirect(`/jobs/${jobId}`)
@@ -292,8 +389,7 @@ export async function startProcessingJob(formData: FormData) {
     const scriptPath = path.join(process.cwd(), "scripts", "process_batch.py")
     console.log(`Spawning processing script: ${scriptPath} for ${jobId}`)
 
-    const venvPython = path.join(process.cwd(), ".venv", "bin", "python3")
-    const child = exec(`"${venvPython}" "${scriptPath}" "${jobId}"`, (error, stdout, stderr) => {
+    const child = exec(`"${VENV_PYTHON}" "${scriptPath}" "${jobId}"`, (error, stdout, stderr) => {
         activeJobs.delete(jobId) // Remove when finished
         if (error) {
             console.error(`Processing script error for ${jobId}:`, stderr)
@@ -344,8 +440,7 @@ export async function applyHeaderCorrection(jobId: string, correction: number) {
         const scriptPath = path.join(process.cwd(), "scripts", "process_batch.py")
         console.log(`[Correction] Spawning processing script: ${scriptPath} for ${jobId}`)
 
-        const venvPython = path.join(process.cwd(), ".venv", "bin", "python3")
-        const child = exec(`"${venvPython}" "${scriptPath}" "${jobId}"`, (error, stdout, stderr) => {
+        const child = exec(`"${VENV_PYTHON}" "${scriptPath}" "${jobId}"`, (error, stdout, stderr) => {
             activeJobs.delete(jobId)
             if (error) console.error(`Processing script error for ${jobId}:`, stderr)
             else console.log(`Processing script success for ${jobId}:`, stdout)
@@ -399,12 +494,19 @@ export async function createJobZip(jobId: string) {
         throw new Error("Job directory not found")
     }
 
-    // Zip command: zip -j (junk paths) -r (recursive) zipPath sourceFiles
-    // We want only processed_*.mp4
-    // Command: cd jobDir && zip zipName processed_*.mp4
+    // Zip command - cross-platform
+    // Windows: PowerShell Compress-Archive, Linux/Mac: zip command
 
     return new Promise<string>((resolve, reject) => {
-        exec(`cd "${jobDirAbs}" && zip -j "${zipName}" processed_*.mp4`, (error, stdout, stderr) => {
+        let zipCommand: string
+        if (isWindows) {
+            // PowerShell command to zip processed_*.mp4 files
+            zipCommand = `powershell -Command "Compress-Archive -Path '${jobDirAbs}\\processed_*.mp4' -DestinationPath '${zipPath}' -Force"`
+        } else {
+            zipCommand = `cd "${jobDirAbs}" && zip -j "${zipName}" processed_*.mp4`
+        }
+
+        exec(zipCommand, (error, stdout, stderr) => {
             if (error) {
                 // If 12, it means no files found usually
                 console.error("Zip Error:", stderr)

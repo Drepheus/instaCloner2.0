@@ -44,6 +44,14 @@ async function downloadFile(url, dest, cookies) {
 }
 
 async function scrape(url, outputDir) {
+    const AUTH_FILE = path.join(__dirname, 'auth.json');
+    const fs_sync = require('fs');
+    const hasAuth = fs_sync.existsSync(AUTH_FILE);
+
+    if (!hasAuth) {
+        console.error('No auth.json found. Run: node scripts/login.js first to login to Instagram.');
+    }
+
     const browser = await chromium.launch({
         headless: true,
         args: [
@@ -54,14 +62,23 @@ async function scrape(url, outputDir) {
             '--window-position=0,0',
             '--ignore-certifcate-errors',
             '--ignore-certifcate-errors-spki-list',
-            '--user-agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"'
+            '--user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"'
         ]
     });
-    const context = await browser.newContext({
-        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+
+    // Load saved auth state if available
+    const contextOptions = {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         viewport: { width: 1280, height: 800 },
         deviceScaleFactor: 1,
-    });
+    };
+
+    if (hasAuth) {
+        contextOptions.storageState = AUTH_FILE;
+        console.error('Using saved Instagram session from auth.json');
+    }
+
+    const context = await browser.newContext(contextOptions);
     const page = await context.newPage();
 
     const reelsData = [];
